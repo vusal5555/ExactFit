@@ -28,7 +28,12 @@ class LeadResponse(BaseModel):
     status: str
 
 
-@router.get("/leads", response_model=List[LeadResponse])
+class ResponseModel(BaseModel):
+    leads: List[LeadResponse]
+    count: int
+
+
+@router.get("/leads", response_model=ResponseModel)
 def get_leads(tier: Optional[int] = None, status: Optional[str] = None):
 
     query = db.table("leads").select("*").order("score", desc=True)
