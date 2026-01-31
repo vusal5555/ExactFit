@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.leads import router as leads_router
 from api.research import router as research_router
+from api.enrich import router as enrich_router
 
 
 app = FastAPI(title="ExactFit API", version="0.1.0")
@@ -18,6 +19,7 @@ app.add_middleware(
 
 app.include_router(leads_router, prefix="/api")
 app.include_router(research_router, prefix="/api")
+app.include_router(enrich_router, prefix="/api")
 
 
 @app.get("/")
