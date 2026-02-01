@@ -1,7 +1,7 @@
 import re
 import httpx
 from bs4 import BeautifulSoup
-from typing import Tuple, Dict
+from typing import Optional, Tuple, Dict
 from urllib.parse import urljoin
 
 
@@ -80,3 +80,88 @@ async def scrape_careers_page(domain: str) -> str:
             return content
 
     return "No careers page found"
+
+
+def extract_domain_from_url(url: str) -> str:
+    """Extract clean domain from URL."""
+
+    domain = url.replace("http://", "").replace("https://", "")
+
+    domain = domain.replace("www.", "")
+
+    domain = domain.split("/")[0]
+
+    domain = domain.split("?")[0]
+
+    return domain.lower()
+
+
+def is_company_website(url: str) -> bool:
+    """Check if URL is likely a company website."""
+
+    if not url.startswith("http"):
+        return False
+
+    excluded = [
+        "greenhouse.io",
+        "lever.co",
+        "indeed.com",
+        "linkedin.com",
+        "glassdoor.com",
+        "wellfound.com",
+        "builtin.com",
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+        "instagram.com",
+        "youtube.com",
+        "github.com",
+        "medium.com",
+        "crunchbase.com",
+        "techcrunch.com",
+    ]
+
+    for site in excluded:
+        if site in url:
+            return False
+    return True
+
+
+def extract_company_website(job_page_url: str) -> Optional[str]:
+    """
+    Scrape a job posting page to find the real company website.
+
+    Works with:
+    - Greenhouse
+    - Lever
+    - Indeed
+
+     Does NOT work with:
+    - LinkedIn (requires login)
+    """
+
+    if "linkedin.com" in job_page_url:
+        return None
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    try:
+        with httpx.Client(follow_redirects=True, timeout=30.0) as client:
+            response = client.get(job_page_url, headers=headers)
+            response.raise_for_status()
+    except Exception:
+        return None
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    all_links = soup.find_all("a", href=True)
+
+    for link in all_links:
+        href = link.get("href", "")
+        if is_company_website(href):
+            domain = extract_domain_from_url(href)
+
+            if "." in domain and len(domain) > 3:
+                return domain
+    return None

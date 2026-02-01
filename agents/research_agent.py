@@ -3,7 +3,7 @@ from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from services.llm import invoke_llm
 from services.search import google_search_sync
-from services.scrape import scrape_page
+from services.scrape import extract_company_website
 
 
 class ResearchState(TypedDict):
@@ -90,6 +90,7 @@ def search_web(state: ResearchState) -> ResearchState:
                     "query": query,
                     "company_slug": None,
                     "source_type": None,
+                    "verified_domain": None,
                 }
 
                 url = r.get("link", "")
@@ -101,12 +102,19 @@ def search_web(state: ResearchState) -> ResearchState:
                         result_data["company_slug"] = parts[1].split("/")[0]
                         result_data["source_type"] = "greenhouse"
 
+                        real_domain = extract_company_website(url)
+                        if real_domain:
+                            result_data["verified_domain"] = real_domain
+
                 # Lever: jobs.lever.co/companyname/...
                 elif "lever.co" in url:
                     parts = url.split("lever.co/")
                     if len(parts) > 1:
                         result_data["company_slug"] = parts[1].split("/")[0]
                         result_data["source_type"] = "lever"
+                        real_domain = extract_company_website(url)
+                        if real_domain:
+                            result_data["verified_domain"] = real_domain
 
                 # Wellfound: wellfound.com/company/companyname/...
                 elif "wellfound.com" in url:
@@ -116,9 +124,17 @@ def search_web(state: ResearchState) -> ResearchState:
                             result_data["company_slug"] = parts[1].split("/")[0]
                             result_data["source_type"] = "wellfound"
 
+                            real_domain = extract_company_website(url)
+                            if real_domain:
+                                result_data["verified_domain"] = real_domain
+
                 # Built In: builtin.com/company/companyname or builtin.com/job/...
                 elif "builtin.com" in url:
                     result_data["source_type"] = "builtin"
+
+                    real_domain = extract_company_website(url)
+                    if real_domain:
+                        result_data["verified_domain"] = real_domain
 
                 # Indeed: indeed.com/cmp/companyname/...
                 elif "indeed.com" in url:
@@ -128,9 +144,17 @@ def search_web(state: ResearchState) -> ResearchState:
                             result_data["company_slug"] = parts[1].split("/")[0]
                             result_data["source_type"] = "indeed"
 
+                            real_domain = extract_company_website(url)
+                            if real_domain:
+                                result_data["verified_domain"] = real_domain
+
                 # Glassdoor: glassdoor.com/job-listing/... or /Overview/...EI_IE12345
                 elif "glassdoor.com" in url:
                     result_data["source_type"] = "glassdoor"
+
+                    real_domain = extract_company_website(url)
+                    if real_domain:
+                        result_data["verified_domain"] = real_domain
 
                 # LinkedIn: linkedin.com/jobs/view/... or /company/...
                 elif "linkedin.com" in url:
@@ -171,17 +195,16 @@ def parse_companies(state: ResearchState) -> ResearchState:
     Search Results:
     {results}
 
-    IMPORTANT RULES FOR DOMAINS:
-    1. If "company_slug" is provided, use it to find the real domain
-    2. Search the snippet for actual website URLs (look for "website:", ".com", ".io", etc.)
-    3. If company_slug is "acmecorp", the domain is likely "acmecorp.com" or "acmecorp.io"
-    4. DO NOT guess random domains. If unsure, use company_slug + ".com"
+    CRITICAL RULES FOR DOMAINS:
+    1. If "verified_domain" exists and is not null, YOU MUST USE IT - this is the real domain scraped from the job page
+    2. If no verified_domain, use "company_slug" + ".com" as a guess
+    3. NEVER ignore verified_domain - it is the correct domain
 
     For EACH result that represents a real company:
 
     Extract:
     - company_name: The actual company name (not "Greenhouse" or "Lever")
-    - domain: Their REAL website domain (use company_slug as base)
+    - domain: Use verified_domain if available, otherwise use company_slug + ".com"
     - source_url: The URL from the search result
     - signal_type: "hiring", "funding", or "tech_stack"
     - signal_detail: What specific signal was found
@@ -191,7 +214,7 @@ def parse_companies(state: ResearchState) -> ResearchState:
         "companies": [
             {{
                 "company_name": "Acme Corp",
-                "domain": "acmecorp.com",
+                "domain": "acme.com",
                 "source_url": "https://boards.greenhouse.io/acmecorp/jobs/123",
                 "signal_type": "hiring",
                 "signal_detail": "Hiring Sales Development Representative"
@@ -205,7 +228,7 @@ def parse_companies(state: ResearchState) -> ResearchState:
 
     result = invoke_llm(
         system_prompt=prompt.format(results=results_text),
-        user_message="Extract companies from these search results. Pay attention to company_slug for domains.",
+        user_message="Extract companies. ALWAYS use verified_domain when available.",
     )
 
     try:
@@ -227,7 +250,15 @@ def parse_companies(state: ResearchState) -> ResearchState:
         company["score"] = 0
         company["signals"] = {company["signal_type"]: company["signal_detail"]}
 
-    return {**state, "parsed_companies": companies}
+    seen_domains = set()
+    unique_companies = []
+    for company in companies:
+        domain = company.get("domain", "").lower()
+        if domain and domain not in seen_domains:
+            seen_domains.add(domain)
+            unique_companies.append(company)
+
+    return {**state, "parsed_companies": unique_companies}
 
 
 def build_research_agent():
