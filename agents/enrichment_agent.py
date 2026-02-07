@@ -6,16 +6,18 @@ from services.pdl import find_person, enrich_email
 
 
 class EnrichmentState(TypedDict):
-    leads: List[Dict[str, Any]]  # Input: leads from Research Agent
-    enriched_leads: List[Dict[str, Any]]  # Output: leads with emails
-    failed_leads: List[Dict[str, Any]]  # Leads we couldn't enrich
+    leads: List[Dict[str, Any]]
+    enriched_leads: List[Dict[str, Any]]
+    failed_leads: List[Dict[str, Any]]
     errors: List[str]
+    target_job_title: str  # NEW: Customer's target role
 
 
 def hunter_enrich(state: EnrichmentState) -> EnrichmentState:
     """Node 1: Find emails using Hunter.io"""
 
     hunter_results = []
+    target_title = state.get("target_job_title", None)
 
     for lead in state["leads"]:
         domain = lead.get("domain", "")
@@ -24,12 +26,14 @@ def hunter_enrich(state: EnrichmentState) -> EnrichmentState:
             state["failed_leads"].append({**lead, "error": "No domain available"})
             continue
 
-        result = find_email(domain, role="sales")
+        # Use customer's target job title (dynamic, not hardcoded)
+        result = find_email(domain, job_title=target_title)
 
         if result.get("email"):
             hunter_results.append(
                 {
                     **lead,
+                    "hunter_email": result["email"],
                     "hunter_name": f"{result.get('first_name', '')} {result.get('last_name', '')}".strip(),
                     "hunter_title": result.get("position", ""),
                     "hunter_confidence": result.get("confidence", 0),
@@ -38,22 +42,17 @@ def hunter_enrich(state: EnrichmentState) -> EnrichmentState:
             )
             continue
 
-        search_result = domain_search(domain, limit=3)
+        # Fallback: domain_search (find anyone at company)
+        search_result = domain_search(domain, limit=5)
 
         if search_result.get("emails"):
-
+            # If we have a target title, try to match it
             best = None
 
-            for person in search_result["emails"]:
-                if not person:
-                    continue
-                dept = (person.get("department") or "").lower()
-                seniority = (person.get("seniority") or "").lower()
+            if target_title:
+                best = find_title_match(search_result["emails"], target_title)
 
-                if "sales" in dept or seniority in ["executive", "senior", "manager"]:
-                    best = person
-                    break
-
+            # If no match or no target title, take first result
             if not best:
                 best = search_result["emails"][0]
 
@@ -78,17 +77,62 @@ def hunter_enrich(state: EnrichmentState) -> EnrichmentState:
     return {**state, "enriched_leads": hunter_results}
 
 
+def find_title_match(contacts: List[Dict], target_title: str) -> Optional[Dict]:
+    """Find contact whose title best matches target."""
+
+    if not target_title:
+        return None
+
+    target_lower = target_title.lower()
+    target_words = set(target_lower.replace("-", " ").split())
+
+    stop_words = {"of", "the", "and", "a", "an", "at", "in", "for"}
+    target_words = target_words - stop_words
+
+    best_match = None
+    best_score = 0
+
+    for contact in contacts:
+        # Handle None values
+        position = contact.get("position") or ""
+        position = position.lower()
+        position_words = set(position.replace("-", " ").split()) - stop_words
+
+        if not position_words:
+            continue
+
+        # Exact match
+        if target_lower in position or position in target_lower:
+            return contact
+
+        # Word overlap
+        matching = target_words & position_words
+        score = len(matching) / max(len(target_words), 1)
+
+        if score > best_score:
+            best_score = score
+            best_match = contact
+
+    # Return if reasonable match (>40%)
+    if best_score >= 0.4:
+        return best_match
+
+    return None
+
+
 def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
     """Node 2: Cross-validate with PDL and calculate confidence."""
 
     final_leads = []
+    target_title = state.get("target_job_title", None)
 
     for lead in state["enriched_leads"]:
         hunter_email = lead.get("hunter_email")
         domain = lead.get("domain", "")
 
         if not hunter_email:
-            pdl_result = find_person(domain, role="sales")
+            # No Hunter email, try PDL directly
+            pdl_result = find_person(domain, job_title=target_title)
 
             if pdl_result.get("email"):
                 lead["contact_email"] = pdl_result["email"]
@@ -96,7 +140,7 @@ def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
                     f"{pdl_result.get('first_name', '')} {pdl_result.get('last_name', '')}".strip()
                 )
                 lead["contact_title"] = pdl_result.get("title", "")
-                lead["confidence"] = 0.6  # Base confidence for PDL found email
+                lead["confidence"] = 0.6  # Single source
                 lead["sources"] = ["pdl"]
                 lead["linkedin_url"] = pdl_result.get("linkedin_url", "")
                 final_leads.append(lead)
@@ -104,9 +148,11 @@ def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
                 state["failed_leads"].append({**lead, "error": "PDL: No email found"})
             continue
 
+        # We have Hunter email, verify with PDL
         pdl_result = enrich_email(hunter_email)
 
         if pdl_result.get("valid"):
+            # PDL confirms Hunter's email
             lead["contact_email"] = hunter_email
             lead["contact_name"] = (
                 lead.get("hunter_name")
@@ -115,15 +161,16 @@ def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
             lead["contact_title"] = lead.get("hunter_title") or pdl_result.get(
                 "title", ""
             )
-            lead["confidence"] = 0.9  # Two sources agree = high confidence
+            lead["confidence"] = 0.9  # Two sources agree
             lead["sources"] = ["hunter", "pdl"]
             lead["linkedin_url"] = pdl_result.get("linkedin_url", "")
             final_leads.append(lead)
         else:
-            pdl_person = find_person(domain, role="sales")
+            # PDL doesn't confirm, try finding someone else
+            pdl_person = find_person(domain, job_title=target_title)
 
             if pdl_person.get("email") and pdl_person["email"] == hunter_email:
-                # Same email found independently = high confidence
+                # Same email found independently
                 lead["contact_email"] = hunter_email
                 lead["contact_name"] = lead.get("hunter_name", "")
                 lead["contact_title"] = lead.get("hunter_title", "")
@@ -131,11 +178,11 @@ def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
                 lead["sources"] = ["hunter", "pdl"]
                 final_leads.append(lead)
             elif pdl_person.get("email"):
-                # PDL found different person - use Hunter but lower confidence
+                # PDL found different person
                 lead["contact_email"] = hunter_email
                 lead["contact_name"] = lead.get("hunter_name", "")
                 lead["contact_title"] = lead.get("hunter_title", "")
-                lead["confidence"] = 0.7  # Slight disagreement
+                lead["confidence"] = 0.7
                 lead["sources"] = ["hunter"]
                 lead["pdl_alternative"] = pdl_person["email"]
                 final_leads.append(lead)
@@ -144,7 +191,7 @@ def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
                 lead["contact_email"] = hunter_email
                 lead["contact_name"] = lead.get("hunter_name", "")
                 lead["contact_title"] = lead.get("hunter_title", "")
-                lead["confidence"] = 0.6  # Single source
+                lead["confidence"] = 0.6
                 lead["sources"] = ["hunter"]
                 final_leads.append(lead)
 
@@ -152,6 +199,7 @@ def pdl_enrich(state: EnrichmentState) -> EnrichmentState:
 
 
 def build_enrichment_agent():
+    """Build the LangGraph workflow."""
 
     workflow = StateGraph(EnrichmentState)
 
@@ -159,18 +207,22 @@ def build_enrichment_agent():
     workflow.add_node("pdl_enrich", pdl_enrich)
 
     workflow.set_entry_point("hunter_enrich")
+
     workflow.add_edge("hunter_enrich", "pdl_enrich")
     workflow.add_edge("pdl_enrich", END)
 
     return workflow.compile()
 
 
-def enrich_leads(leads: List[Dict[str, Any]]) -> Dict[str, Any]:
+def enrich_leads(
+    leads: List[Dict[str, Any]], target_job_title: str = None
+) -> Dict[str, Any]:
     """
     Main function: Enrich leads with contact emails.
 
     Args:
         leads: List of leads from Research Agent
+        target_job_title: Customer's target role (e.g., "Head of Support", "VP Sales")
 
     Returns:
         Dict with enriched leads, failed leads, and stats
@@ -178,7 +230,13 @@ def enrich_leads(leads: List[Dict[str, Any]]) -> Dict[str, Any]:
     agent = build_enrichment_agent()
 
     result = agent.invoke(
-        {"leads": leads, "enriched_leads": [], "failed_leads": [], "errors": []}
+        {
+            "leads": leads,
+            "enriched_leads": [],
+            "failed_leads": [],
+            "errors": [],
+            "target_job_title": target_job_title or "",
+        }
     )
 
     # Calculate stats
@@ -217,34 +275,30 @@ if __name__ == "__main__":
             "signal_detail": "Hiring SDR",
         },
         {
-            "company_name": "Salesforce",
-            "domain": "salesforce.com",
+            "company_name": "Zendesk",
+            "domain": "zendesk.com",
             "signal_type": "hiring",
-            "signal_detail": "Hiring BDR",
+            "signal_detail": "Hiring Support Manager",
         },
     ]
 
-    print(f"\nEnriching {len(test_leads)} leads...\n")
+    # Test with different job titles
+    print("\n--- Test 1: Finding VP Sales ---")
+    result1 = enrich_leads(test_leads, target_job_title="VP Sales")
+    print(f"Found {result1['stats']['enriched']} contacts")
 
-    result = enrich_leads(test_leads)
+    print("\n--- Test 2: Finding Head of Support ---")
+    result2 = enrich_leads(test_leads, target_job_title="Head of Support")
+    print(f"Found {result2['stats']['enriched']} contacts")
 
-    print(f"Stats:")
-    print(f"  • Total: {result['stats']['total_input']}")
-    print(f"  • Enriched: {result['stats']['enriched']}")
-    print(f"  • Failed: {result['stats']['failed']}")
-    print(f"  • Success Rate: {result['stats']['success_rate']}%")
-    print(f"  • High Confidence: {result['stats']['high_confidence_count']}")
+    print("\n--- Test 3: Finding HR Manager ---")
+    result3 = enrich_leads(test_leads, target_job_title="HR Manager")
+    print(f"Found {result3['stats']['enriched']} contacts")
 
-    print(f"\nEnriched Leads:")
-    for lead in result["enriched_leads"]:
+    print("\nEnriched Leads (VP Sales):")
+    for lead in result1["enriched_leads"]:
         print(f"\n  🏢 {lead['company_name']}")
         print(f"     Email: {lead.get('contact_email', 'N/A')}")
         print(f"     Name: {lead.get('contact_name', 'N/A')}")
         print(f"     Title: {lead.get('contact_title', 'N/A')}")
         print(f"     Confidence: {lead.get('confidence', 0) * 100:.0f}%")
-        print(f"     Sources: {', '.join(lead.get('sources', []))}")
-
-    if result["failed_leads"]:
-        print(f"\nFailed Leads:")
-        for lead in result["failed_leads"]:
-            print(f"  ✗ {lead['company_name']}: {lead.get('error', 'Unknown error')}")

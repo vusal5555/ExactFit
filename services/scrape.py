@@ -1,16 +1,13 @@
 import re
 import httpx
 from bs4 import BeautifulSoup
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 from urllib.parse import urljoin
 
 
 async def scrape_page(url: str) -> Tuple[str, Dict[str, str]]:
     """
     Scrape a webpage and return text content + extracted links.
-
-    Returns:
-        Tuple of (text_content, links_dict)
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -25,18 +22,14 @@ async def scrape_page(url: str) -> Tuple[str, Dict[str, str]]:
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Remove script and style elements
     for element in soup(["script", "style", "noscript", "nav", "footer"]):
         element.decompose()
 
-    # Extract text
     text = soup.get_text(separator="\n", strip=True)
     text = re.sub(r"\n{3,}", "\n\n", text)
 
-    # Extract important links
     links = extract_links(soup, url)
 
-    # Limit length
     if len(text) > 15000:
         text = text[:15000] + "\n\n[Truncated...]"
 
@@ -84,24 +77,22 @@ async def scrape_careers_page(domain: str) -> str:
 
 def extract_domain_from_url(url: str) -> str:
     """Extract clean domain from URL."""
-
     domain = url.replace("http://", "").replace("https://", "")
-
     domain = domain.replace("www.", "")
-
     domain = domain.split("/")[0]
-
     domain = domain.split("?")[0]
-
     return domain.lower()
 
 
 def is_company_website(url: str) -> bool:
     """Check if URL is likely a company website."""
 
-    if not url.startswith("http"):
+    if not url or not url.startswith("http"):
         return False
 
+    url_lower = url.lower()
+
+    # Excluded domains
     excluded = [
         "greenhouse.io",
         "lever.co",
@@ -110,6 +101,7 @@ def is_company_website(url: str) -> bool:
         "glassdoor.com",
         "wellfound.com",
         "builtin.com",
+        "angel.co",
         "facebook.com",
         "twitter.com",
         "x.com",
@@ -119,25 +111,69 @@ def is_company_website(url: str) -> bool:
         "medium.com",
         "crunchbase.com",
         "techcrunch.com",
+        "google.com",
+        "apple.com/app",
+        "play.google.com",
+        "apps.apple.com",
+        "bit.ly",
+        "t.co",
+        "mailto:",
+        "tel:",
+        "javascript:",
+        ".gov",
+        ".edu",
+        "dol.gov",
     ]
 
     for site in excluded:
-        if site in url:
+        if site in url_lower:
             return False
+
     return True
+
+
+def extract_email_domain(soup: BeautifulSoup) -> Optional[str]:
+    """Extract company domain from email addresses on page."""
+
+    # Find mailto links
+    mailto_links = soup.find_all("a", href=lambda x: x and x.startswith("mailto:"))
+
+    for link in mailto_links:
+        href = link.get("href", "")
+        email = href.replace("mailto:", "").split("?")[0].strip()
+
+        if "@" in email:
+            domain = email.split("@")[1].lower()
+
+            # Skip generic email providers
+            generic = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com"]
+            if domain not in generic:
+                return domain
+
+    # Also search text for email patterns
+    text = soup.get_text()
+    email_pattern = r"[a-zA-Z0-9._%+-]+@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+    matches = re.findall(email_pattern, text)
+
+    for domain in matches:
+        domain = domain.lower()
+        generic = [
+            "gmail.com",
+            "yahoo.com",
+            "hotmail.com",
+            "outlook.com",
+            "greenhouse.io",
+            "lever.co",
+        ]
+        if domain not in generic:
+            return domain
+
+    return None
 
 
 def extract_company_website(job_page_url: str) -> Optional[str]:
     """
     Scrape a job posting page to find the real company website.
-
-    Works with:
-    - Greenhouse
-    - Lever
-    - Indeed
-
-     Does NOT work with:
-    - LinkedIn (requires login)
     """
 
     if "linkedin.com" in job_page_url:
@@ -147,21 +183,78 @@ def extract_company_website(job_page_url: str) -> Optional[str]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
+    # Extract company slug from URL
+    company_slug = None
+    if "greenhouse.io/" in job_page_url:
+        parts = job_page_url.split("greenhouse.io/")
+        if len(parts) > 1:
+            company_slug = parts[1].split("/")[0]
+    elif "lever.co/" in job_page_url:
+        parts = job_page_url.split("lever.co/")
+        if len(parts) > 1:
+            company_slug = parts[1].split("/")[0]
+
     try:
         with httpx.Client(follow_redirects=True, timeout=30.0) as client:
             response = client.get(job_page_url, headers=headers)
             response.raise_for_status()
     except Exception:
+        # Fallback to slug
+        if company_slug:
+            return f"{company_slug}.com"
         return None
+
     soup = BeautifulSoup(response.text, "html.parser")
 
+    # Method 1: Try to find email domain (most reliable)
+    email_domain = extract_email_domain(soup)
+    if email_domain:
+        return email_domain
+
+    # Method 2: Look for links with company website indicators
     all_links = soup.find_all("a", href=True)
+
+    candidates: List[Tuple[int, str]] = []
 
     for link in all_links:
         href = link.get("href", "")
-        if is_company_website(href):
-            domain = extract_domain_from_url(href)
 
-            if "." in domain and len(domain) > 3:
-                return domain
+        if not is_company_website(href):
+            continue
+
+        domain = extract_domain_from_url(href)
+
+        if not domain or "." not in domain or len(domain) < 4:
+            continue
+
+        # Score the link
+        score = 0
+        link_text = link.get_text(strip=True).lower()
+
+        # Company slug match
+        if company_slug:
+            slug_clean = company_slug.lower().replace("-", "").replace("_", "")
+            domain_clean = domain.replace("-", "").replace(".", "").replace("_", "")
+            if slug_clean in domain_clean:
+                score += 50
+
+        # Link text indicators
+        if any(word in link_text for word in ["website", "visit", "home", "about"]):
+            score += 30
+
+        # Penalize deep paths
+        path_depth = href.count("/") - 2
+        if path_depth > 2:
+            score -= 10
+
+        candidates.append((score, domain))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
+    # Method 3: Fallback to company slug
+    if company_slug:
+        return f"{company_slug}.com"
+
     return None

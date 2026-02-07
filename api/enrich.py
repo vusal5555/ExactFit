@@ -1,24 +1,28 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, List, Optional
+from typing import List, Optional
 from agents.enrichment_agent import enrich_leads
 from utils.database import get_db
-
 
 router = APIRouter()
 db = get_db()
 
 
 class EnrichRequest(BaseModel):
-    leads_ids: Optional[List[str]] = None
+    lead_ids: Optional[List[str]] = None
     enrich_all: bool = False
+    target_job_title: Optional[str] = None  # NEW: Customer's target role
 
 
 @router.post("/enrich")
 def run_enrichment(request: EnrichRequest):
     """
     Enrich leads with contact emails.
-    Either pass lead_ids or set enrich_all=True.
+
+    Args:
+        lead_ids: Specific leads to enrich
+        enrich_all: Or enrich all discovered leads
+        target_job_title: Role to find (e.g., "VP Sales", "HR Manager", "Head of Support")
     """
 
     # Get leads from database
@@ -36,8 +40,8 @@ def run_enrichment(request: EnrichRequest):
     if not leads:
         return {"message": "No leads to enrich", "enriched": 0}
 
-    # Run enrichment
-    enrichment_result = enrich_leads(leads)
+    # Run enrichment with customer's target job title
+    enrichment_result = enrich_leads(leads, target_job_title=request.target_job_title)
 
     # Update database with enriched data
     updated_count = 0
@@ -56,7 +60,6 @@ def run_enrichment(request: EnrichRequest):
             "linkedin_url": lead.get("linkedin_url", ""),
         }
 
-        # Only include sources if it's a list
         sources = lead.get("sources", [])
         if isinstance(sources, list):
             update_data["sources"] = sources
@@ -89,6 +92,7 @@ def run_enrichment(request: EnrichRequest):
         "stats": enrichment_result["stats"],
         "enriched_count": updated_count,
         "failed_count": len(enrichment_result["failed_leads"]),
+        "target_job_title": request.target_job_title or "Any",
     }
 
 
