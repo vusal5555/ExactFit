@@ -11,6 +11,7 @@ load_dotenv()
 
 def get_llm(model: str = "gpt-5-mini", temperature: float = 0) -> ChatOpenAI:
     """Get OpenAI LLM instance."""
+
     return ChatOpenAI(
         model=model, temperature=temperature, api_key=os.getenv("OPEN_AI_API_KEY")
     )
@@ -34,6 +35,7 @@ def invoke_llm(
     Returns:
         String response or Pydantic model instance
     """
+
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_message),
@@ -56,6 +58,7 @@ async def invoke_llm_async(
     response_format: Optional[Type[BaseModel]] = None,
 ):
     """Async version of invoke_llm."""
+
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_message),

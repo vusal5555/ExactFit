@@ -8,7 +8,9 @@ from urllib.parse import urljoin
 async def scrape_page(url: str) -> Tuple[str, Dict[str, str]]:
     """
     Scrape a webpage and return text content + extracted links.
+
     """
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -17,6 +19,7 @@ async def scrape_page(url: str) -> Tuple[str, Dict[str, str]]:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
+
     except Exception as e:
         return f"Error scraping {url}: {str(e)}", {}
 
@@ -32,12 +35,12 @@ async def scrape_page(url: str) -> Tuple[str, Dict[str, str]]:
 
     if len(text) > 15000:
         text = text[:15000] + "\n\n[Truncated...]"
-
     return text, links
 
 
 def extract_links(soup: BeautifulSoup, base_url: str) -> Dict[str, str]:
     """Extract careers, blog, and social links from page."""
+
     links = {"careers": "", "blog": "", "twitter": "", "linkedin": "", "facebook": ""}
 
     for anchor in soup.find_all("a", href=True):
@@ -60,6 +63,7 @@ def extract_links(soup: BeautifulSoup, base_url: str) -> Dict[str, str]:
 
 async def scrape_careers_page(domain: str) -> str:
     """Try to find and scrape a company's careers page."""
+
     possible_urls = [
         f"https://{domain}/careers",
         f"https://{domain}/jobs",
@@ -69,14 +73,15 @@ async def scrape_careers_page(domain: str) -> str:
 
     for url in possible_urls:
         content, _ = await scrape_page(url)
+
         if not content.startswith("Error"):
             return content
-
     return "No careers page found"
 
 
 def extract_domain_from_url(url: str) -> str:
     """Extract clean domain from URL."""
+
     domain = url.replace("http://", "").replace("https://", "")
     domain = domain.replace("www.", "")
     domain = domain.split("/")[0]
@@ -92,7 +97,6 @@ def is_company_website(url: str) -> bool:
 
     url_lower = url.lower()
 
-    # Excluded domains
     excluded = [
         "greenhouse.io",
         "lever.co",
@@ -135,28 +139,33 @@ def is_company_website(url: str) -> bool:
 def extract_email_domain(soup: BeautifulSoup) -> Optional[str]:
     """Extract company domain from email addresses on page."""
 
-    # Find mailto links
     mailto_links = soup.find_all("a", href=lambda x: x and x.startswith("mailto:"))
 
     for link in mailto_links:
+        link: BeautifulSoup = link
         href = link.get("href", "")
-        email = href.replace("mailto:", "").split("?")[0].strip()
+        email = href.replace("mailto:", "").split("?")[0]
 
-        if "@" in email:
-            domain = email.split("@")[1].lower()
+    if "@" in email:
+        domain = email.split("@")[1].lower()
 
-            # Skip generic email providers
-            generic = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com"]
-            if domain not in generic:
-                return domain
+        generic = [
+            "gmail.com",
+            "yahoo.com",
+            "outlook.com",
+            "hotmail.com",
+        ]
 
-    # Also search text for email patterns
+        if domain not in generic:
+            return domain
+
     text = soup.get_text()
     email_pattern = r"[a-zA-Z0-9._%+-]+@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
     matches = re.findall(email_pattern, text)
 
     for domain in matches:
         domain = domain.lower()
+
         generic = [
             "gmail.com",
             "yahoo.com",
@@ -165,6 +174,7 @@ def extract_email_domain(soup: BeautifulSoup) -> Optional[str]:
             "greenhouse.io",
             "lever.co",
         ]
+
         if domain not in generic:
             return domain
 
